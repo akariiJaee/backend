@@ -1,12 +1,17 @@
 /* =========================================================
-   JAE PORTFOLIO — BACKEND SERVER
-   Express + Nodemailer contact form handler.
+   JAE PORTFOLIO — BACKEND SERVER (v2)
+   Express + Resend (HTTPS email API) contact form handler.
+
+   Why this version is different:
+   Render's free tier blocks outbound SMTP connections, so
+   direct Gmail SMTP (via Nodemailer) times out. Resend sends
+   mail over a normal HTTPS API call instead, which always
+   works on free hosting tiers.
 
    What this does:
    - Exposes POST /api/contact
-   - Validates the submitted fields (mirrors the frontend rules)
-   - Sends YOU (manalojesz@gmail.com) an email with the inquiry
-   - Sends the CLIENT an automatic "I received your message" reply
+   - Validates the submitted fields
+   - Emails YOU (manalojesz@gmail.com) the inquiry via Resend
    - Rate-limits requests so the endpoint can't be spammed
 ========================================================= */
 
@@ -14,19 +19,21 @@ require('dotenv').config();
 
 const express = require('express');
 const cors = require('cors');
-const nodemailer = require('nodemailer');
 const rateLimit = require('express-rate-limit');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Render sits behind a reverse proxy — this tells Express to trust
+// the X-Forwarded-For header so express-rate-limit can correctly
+// identify each visitor's IP instead of erroring out.
+app.set('trust proxy', 1);
 
 // -----------------------------------------------------------
 // 1. BASIC MIDDLEWARE
 // -----------------------------------------------------------
 app.use(express.json({ limit: '100kb' }));
 
-// Only allow requests from your own site(s). Add every domain
-// your portfolio is (or will be) served from.
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
   .split(',')
   .map(o => o.trim())
@@ -34,8 +41,6 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
 
 app.use(cors({
   origin(origin, callback) {
-    // Allow tools like curl/Postman (no origin header) and any
-    // origin explicitly whitelisted in .env
     if (!origin || allowedOrigins.length === 0 || allowedOrigins.includes(origin)) {
       return callback(null, true);
     }
@@ -44,39 +49,18 @@ app.use(cors({
 }));
 
 // -----------------------------------------------------------
-// 2. RATE LIMITING (protects your inbox + your Gmail quota)
+// 2. RATE LIMITING
 // -----------------------------------------------------------
 const contactLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 5,                   // 5 submissions per IP per window
+  windowMs: 15 * 60 * 1000,
+  max: 5,
   standardHeaders: true,
   legacyHeaders: false,
   message: { ok: false, error: 'Too many messages sent. Please try again later.' }
 });
 
 // -----------------------------------------------------------
-// 3. MAIL TRANSPORTER (Gmail via App Password)
-// -----------------------------------------------------------
-const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: {
-    user: process.env.GMAIL_USER,   // manalojesz@gmail.com
-    pass: process.env.GMAIL_APP_PASSWORD // 16-char Gmail App Password
-  }
-});
-
-// Fail loudly on boot if mail credentials are missing/broken,
-// instead of silently failing on every real submission.
-transporter.verify((err) => {
-  if (err) {
-    console.error('✗ Mail transporter failed to verify:', err.message);
-  } else {
-    console.log('✓ Mail transporter ready');
-  }
-});
-
-// -----------------------------------------------------------
-// 4. VALIDATION (mirrors script.js validateField logic)
+// 3. VALIDATION
 // -----------------------------------------------------------
 const PROJECT_TYPES = ['video', 'graphic', 'uiux', 'encoding', 'social', 'other'];
 const BUDGETS = ['small', 'medium', 'large', 'enterprise', ''];
@@ -109,7 +93,6 @@ function validate(body) {
   if (!message.trim()) errors.message = 'Please add a short message.';
   else if (message.trim().length < 10) errors.message = 'Please add a bit more detail.';
 
-  // Honeypot field — real users never fill this in.
   if (body.website) errors.website = 'Spam detected.';
 
   return { errors, isValid: Object.keys(errors).length === 0, clean: {
@@ -138,6 +121,33 @@ const BUDGET_LABELS = {
   enterprise: '$5,000+',
   '': 'Not specified'
 };
+
+// -----------------------------------------------------------
+// 4. SEND EMAIL VIA RESEND (HTTPS API — no SMTP, no blocking)
+// -----------------------------------------------------------
+async function sendViaResend({ to, subject, html, replyTo }) {
+  const response = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${process.env.RESEND_API_KEY}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      from: process.env.FROM_EMAIL || 'Portfolio Contact <onboarding@resend.dev>',
+      to: [to],
+      subject,
+      html,
+      reply_to: replyTo
+    })
+  });
+
+  if (!response.ok) {
+    const errText = await response.text().catch(() => '');
+    throw new Error(`Resend API error (${response.status}): ${errText}`);
+  }
+
+  return response.json();
+}
 
 // -----------------------------------------------------------
 // 5. ROUTES
@@ -170,37 +180,13 @@ app.post('/api/contact', contactLimiter, async (req, res) => {
     </div>
   `;
 
-  const autoReplyHtml = `
-    <div style="font-family: Arial, sans-serif; line-height:1.6; color:#222;">
-      <p>Hi ${escapeHtml(clean.fullName)},</p>
-      <p>Thanks for reaching out! I've received your inquiry about <strong>${escapeHtml(projectLabel)}</strong> and will get back to you shortly, usually within 24–48 hours.</p>
-      <p>Here's a copy of what you sent:</p>
-      <p style="white-space:pre-wrap; background:#f6f6f6; padding:12px; border-radius:8px;">${escapeHtml(clean.message)}</p>
-      <p>Talk soon,<br>Jae</p>
-    </div>
-  `;
-
   try {
-    // Email to you
-    await transporter.sendMail({
-      from: `"Portfolio Contact Form" <${process.env.GMAIL_USER}>`,
+    await sendViaResend({
       to: process.env.NOTIFY_EMAIL || 'manalojesz@gmail.com',
-      replyTo: clean.email,
       subject: `New inquiry from ${clean.fullName} — ${projectLabel}`,
-      html: notifyHtml
+      html: notifyHtml,
+      replyTo: clean.email
     });
-
-    // Auto-reply to the client (best-effort — don't fail the request if this errors)
-    try {
-      await transporter.sendMail({
-        from: `"Jae Manalo" <${process.env.GMAIL_USER}>`,
-        to: clean.email,
-        subject: `Got your message, ${clean.fullName}!`,
-        html: autoReplyHtml
-      });
-    } catch (autoReplyErr) {
-      console.error('Auto-reply failed (non-fatal):', autoReplyErr.message);
-    }
 
     return res.json({ ok: true, message: 'Message sent — thank you! I\'ll get back to you shortly.' });
   } catch (err) {
