@@ -63,7 +63,9 @@ const contactLimiter = rateLimit({
 // 3. VALIDATION
 // -----------------------------------------------------------
 const PROJECT_TYPES = ['video', 'graphic', 'uiux', 'encoding', 'social', 'other'];
-const BUDGETS = ['small', 'medium', 'large', 'enterprise', ''];
+const BUDGETS = ['starter', 'standard', 'premium', 'advanced', 'retainer', ''];
+const ENGAGEMENT_TYPES = ['project', 'regular', ''];
+const CONTRACT_DURATIONS = ['one_time', '1_4_weeks', '1_month', '3_months', '6_months', 'ongoing', ''];
 
 function escapeHtml(str = '') {
   return String(str)
@@ -76,7 +78,7 @@ function escapeHtml(str = '') {
 
 function validate(body) {
   const errors = {};
-  const { fullName = '', email = '', company = '', projectType = '', budget = '', message = '' } = body;
+  const { fullName = '', email = '', company = '', projectType = '', budget = '', engagementType = '', contractDuration = '', message = '' } = body;
 
   if (!fullName.trim()) errors.fullName = 'Please enter your full name.';
   else if (fullName.trim().length < 2) errors.fullName = 'Name looks too short.';
@@ -89,6 +91,8 @@ function validate(body) {
   else if (!PROJECT_TYPES.includes(projectType)) errors.projectType = 'Invalid project type.';
 
   if (budget && !BUDGETS.includes(budget)) errors.budget = 'Invalid budget option.';
+  if (engagementType && !ENGAGEMENT_TYPES.includes(engagementType)) errors.engagementType = 'Invalid engagement type.';
+  if (contractDuration && !CONTRACT_DURATIONS.includes(contractDuration)) errors.contractDuration = 'Invalid contract duration.';
 
   if (!message.trim()) errors.message = 'Please add a short message.';
   else if (message.trim().length < 10) errors.message = 'Please add a bit more detail.';
@@ -101,6 +105,8 @@ function validate(body) {
     company: company.trim(),
     projectType,
     budget,
+    engagementType,
+    contractDuration,
     message: message.trim()
   } };
 }
@@ -115,17 +121,34 @@ const PROJECT_LABELS = {
 };
 
 const BUDGET_LABELS = {
-  small: 'Under $500',
-  medium: '$500 – $1,500',
-  large: '$1,500 – $5,000',
-  enterprise: '$5,000+',
+  starter: '₱1,500 – ₱3,000 (Quick edits / short-form)',
+  standard: '₱3,000 – ₱8,000 (Standard project)',
+  premium: '₱8,000 – ₱15,000 (Larger / multi-video project)',
+  advanced: '₱15,000 – ₱20,000 (Premium / branded / narrative)',
+  retainer: '₱20,000+ per month (Regular / retainer)',
+  '': 'Not specified'
+};
+
+const ENGAGEMENT_LABELS = {
+  project: 'Project-based (one-off)',
+  regular: 'Regular / ongoing hire',
+  '': 'Not specified'
+};
+
+const DURATION_LABELS = {
+  one_time: 'One-time delivery',
+  '1_4_weeks': '1–4 weeks',
+  '1_month': '1 month retainer',
+  '3_months': '3 months retainer',
+  '6_months': '6 months retainer',
+  ongoing: 'Ongoing / full-time regular',
   '': 'Not specified'
 };
 
 // -----------------------------------------------------------
 // 4. SEND EMAIL VIA RESEND (HTTPS API — no SMTP, no blocking)
 // -----------------------------------------------------------
-async function sendViaResend({ to, subject, html, replyTo }) {
+async function sendViaResend({ to, subject, html, replyTo, fromName }) {
   const response = await fetch('https://api.resend.com/emails', {
     method: 'POST',
     headers: {
@@ -133,7 +156,7 @@ async function sendViaResend({ to, subject, html, replyTo }) {
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
-      from: process.env.FROM_EMAIL || 'Portfolio Contact <onboarding@resend.dev>',
+      from: `${fromName} <onboarding@resend.dev>`,
       to: [to],
       subject,
       html,
@@ -163,6 +186,8 @@ app.post('/api/contact', contactLimiter, async (req, res) => {
 
   const projectLabel = PROJECT_LABELS[clean.projectType] || clean.projectType;
   const budgetLabel = BUDGET_LABELS[clean.budget] || clean.budget;
+  const engagementLabel = ENGAGEMENT_LABELS[clean.engagementType] || clean.engagementType;
+  const durationLabel = DURATION_LABELS[clean.contractDuration] || clean.contractDuration;
 
   const notifyHtml = `
     <div style="font-family: Arial, sans-serif; line-height:1.6; color:#222;">
@@ -174,6 +199,8 @@ app.post('/api/contact', contactLimiter, async (req, res) => {
         <tr><td style="padding:6px 0; font-weight:bold;">Company</td><td>${escapeHtml(clean.company) || '—'}</td></tr>
         <tr><td style="padding:6px 0; font-weight:bold;">Project Type</td><td>${escapeHtml(projectLabel)}</td></tr>
         <tr><td style="padding:6px 0; font-weight:bold;">Budget</td><td>${escapeHtml(budgetLabel)}</td></tr>
+        <tr><td style="padding:6px 0; font-weight:bold;">Engagement</td><td>${escapeHtml(engagementLabel)}</td></tr>
+        <tr><td style="padding:6px 0; font-weight:bold;">Duration</td><td>${escapeHtml(durationLabel)}</td></tr>
       </table>
       <p style="font-weight:bold; margin-bottom:4px;">Message</p>
       <p style="white-space:pre-wrap; background:#f6f6f6; padding:12px; border-radius:8px;">${escapeHtml(clean.message)}</p>
@@ -185,7 +212,8 @@ app.post('/api/contact', contactLimiter, async (req, res) => {
       to: process.env.NOTIFY_EMAIL || 'manalojesz@gmail.com',
       subject: `New inquiry from ${clean.fullName} — ${projectLabel}`,
       html: notifyHtml,
-      replyTo: clean.email
+      replyTo: clean.email,
+      fromName: `${clean.fullName} (Portfolio Inquiry)`
     });
 
     return res.json({ ok: true, message: 'Message sent — thank you! I\'ll get back to you shortly.' });
